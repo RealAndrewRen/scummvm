@@ -18,12 +18,17 @@
  * along with this program.  If not, see <http://www.gnu.org/licenses/>.
  *
  */
-
+#include <windows.h>
 #include "common/file.h"
 #include "common/md5.h"
 #include "common/translation.h"
 
 #include "gui/error.h"
+#include "gui/message.h"
+
+#include <thread>
+#include <future>
+using namespace std;
 
 #include "engines/grim/md5check.h"
 #include "engines/grim/grim.h"
@@ -417,6 +422,7 @@ const char *emi_installer[] = {
 	"a42f8aa079a6d23c285fceba191e67a4", // English (Monkey Island 4 Installer)
 };
 
+bool MD5Check::_userCanceled = false;
 bool MD5Check::_initted = false;
 Common::Array<MD5Check::MD5Sum> *MD5Check::_files = nullptr;
 int MD5Check::_iterator = -1;
@@ -425,6 +431,7 @@ void MD5Check::init() {
 	if (_initted) {
 		return;
 	}
+	_userCanceled = false; 
 	_initted = true;
 	_files = new Common::Array<MD5Sum>();
 
@@ -575,6 +582,10 @@ bool MD5Check::checkFiles() {
 	return ok;
 }
 
+bool MD5Check::userCanceled() {
+	return _userCanceled;
+}
+
 void MD5Check::startCheckFiles() {
 	init();
 	_iterator = 0;
@@ -584,7 +595,6 @@ bool MD5Check::advanceCheck(int *pos, int *total) {
 	if (_iterator < 0) {
 		return false;
 	}
-
 	const MD5Sum &sum = (*_files)[_iterator++];
 	if (pos) {
 		*pos = _iterator;
@@ -599,12 +609,20 @@ bool MD5Check::advanceCheck(int *pos, int *total) {
 	Common::File file;
 	if (file.open(sum.filename)) {
 		Common::String md5 = Common::computeStreamMD5AsString(file);
-		if (!checkMD5(sum, md5.c_str())) {
+		thread t(checkMD5(sum, md5.c_str()));
+		while (t.joinable() && !userCanceled) {
 			warning("'%s' may be corrupted. MD5: '%s'", sum.filename, md5.c_str());
-			GUI::displayErrorDialog(Common::U32String::format(_("The game data file %s may be corrupted.\nIf you are sure it is "
-									"not please provide the ScummVM team the following code, along with the file name, the language and a "
-									"description of your game version (i.e. dvd-box or jewelcase):\n%s"), sum.filename, md5.c_str()));
-			return false;
+			auto noticeMsg = Common::U32String::format(_("The game data file %s may be corrupted.\nIf you are sure it is "
+														 "not please provide the ScummVM team the following code, along with the file name, the language and a "
+														 "description of your game version (i.e. dvd-box or jewelcase):\n%s"),
+													   sum.filename, md5.c_str());
+			auto alert = GUI::MessageDialog(noticeMsg, _("Continue"), _("Stop"));
+			if (alert.runModal() == GUI::kMessageAlt) {
+				// The user requested to stop processing md5 checksums so this will bail early.
+				_userCanceled = true;
+				return false;
+			}
+			this_thread::sleep_for(chrono::milliseconds(100));
 		}
 	} else {
 		Common::String urlForRequiredDataFiles = Common::String::format("https://wiki.scummvm.org/index.php?title=%s#Required_data_files",
